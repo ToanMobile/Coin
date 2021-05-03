@@ -1,7 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.example.wefinex">
+    package="com.toandev.coin">
    <application
-        android:label="wefinex"
+        android:label="My Wefinex"
         android:icon="@mipmap/ic_launcher">
         <activity
             android:name=".MainActivity"

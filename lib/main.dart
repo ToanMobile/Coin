@@ -1,40 +1,329 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:wefinex/ui/home_screen.dart';
-import 'package:wefinex/ui/not_found_page.dart';
-import 'package:wefinex/utils/route_generator.dart';
-import 'package:wefinex/utils/uidata.dart';
+import 'package:flutter/services.dart';
+import 'package:get/get.dart';
+import 'package:get/get_navigation/src/root/get_material_app.dart';
+import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:wefinex/define/constants.dart';
+import 'package:wefinex/languages/language.dart';
 
-import 'utils/uidata.dart';
+import 'setting/settings_page.dart';
+import 'tabs.dart';
 
-Future main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  runApp(MyApp());
+const double appBarHeight = 48.0;
+const double appBarElevation = 1.0;
+
+bool shortenOn = false;
+
+List marketListData;
+Map portfolioMap;
+List portfolioDisplay;
+Map totalPortfolioStats;
+
+bool isIOS;
+String upArrow = "⬆";
+String downArrow = "⬇";
+
+int lastUpdate;
+
+Future<Null> getMarketData() async {
+  int pages = 5;
+  List tempMarketListData = [];
+
+  Future<Null> _pullData(page) async {
+    var response = await http
+        .get(Uri.tryParse("https://min-api.cryptocompare.com/data/top/mktcapfull?tsym=USD&limit=100" + "&page=" + page.toString()), headers: {"Accept": "application/json"});
+    List rawMarketListData = JsonDecoder().convert(response.body)["Data"];
+    tempMarketListData.addAll(rawMarketListData);
+  }
+
+  List<Future> futures = [];
+  for (int i = 0; i < pages; i++) {
+    futures.add(_pullData(i));
+  }
+  await Future.wait(futures);
+
+  marketListData = [];
+  // Filter out lack of financial data
+  for (Map coin in tempMarketListData) {
+    if (coin.containsKey("RAW") && coin.containsKey("CoinInfo")) {
+      marketListData.add(coin);
+    }
+  }
+
+  getApplicationDocumentsDirectory().then((Directory directory) async {
+    File jsonFile = File(directory.path + "/marketData.json");
+    jsonFile.writeAsStringSync(json.encode(marketListData));
+  });
+  print("Got market data.");
+
+  lastUpdate = DateTime.now().millisecondsSinceEpoch;
 }
 
-class MyApp extends StatelessWidget {
-  // This widget is the root of your application.
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  await getApplicationDocumentsDirectory().then((Directory directory) async {
+    File jsonFile = File(directory.path + "/portfolio.json");
+    if (jsonFile.existsSync()) {
+      portfolioMap = json.decode(jsonFile.readAsStringSync());
+    } else {
+      jsonFile.createSync();
+      jsonFile.writeAsStringSync("{}");
+      portfolioMap = {};
+    }
+    if (portfolioMap == null) {
+      portfolioMap = {};
+    }
+    jsonFile = File(directory.path + "/marketData.json");
+    if (jsonFile.existsSync()) {
+      marketListData = json.decode(jsonFile.readAsStringSync());
+    } else {
+      jsonFile.createSync();
+      jsonFile.writeAsStringSync("[]");
+      marketListData = [];
+      // getMarketData(); ?does this work?
+    }
+  });
+
+  int themeMode = themeAuto;
+  bool darkOLED = false;
+  SharedPreferences prefs = await SharedPreferences.getInstance();
+  if (prefs.getBool("shortenOn") != null && prefs.getInt("themeMode") != null) {
+    shortenOn = prefs.getBool("shortenOn");
+    themeMode = prefs.getInt("themeMode");
+    darkOLED = prefs.getBool("darkOLED");
+  }
+
+  runApp(TraceApp(themeMode, darkOLED));
+}
+
+numCommaParse(numString) {
+  if (shortenOn) {
+    String str = num.parse(numString ?? "0").round().toString().replaceAllMapped(RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'), (Match m) => "${m[1]},");
+    List<String> strList = str.split(",");
+
+    if (strList.length > 3) {
+      return strList[0] + "." + strList[1].substring(0, 4 - strList[0].length) + "B";
+    } else if (strList.length > 2) {
+      return strList[0] + "." + strList[1].substring(0, 4 - strList[0].length) + "M";
+    } else {
+      return num.parse(numString ?? "0").toString().replaceAllMapped(RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'), (Match m) => "${m[1]},");
+    }
+  }
+
+  return num.parse(numString ?? "0").toString().replaceAllMapped(RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'), (Match m) => "${m[1]},");
+}
+
+normalizeNum(num input) {
+  if (input == null) {
+    input = 0;
+  }
+  if (input >= 100000) {
+    return numCommaParse(input.round().toString());
+  } else if (input >= 1000) {
+    return numCommaParse(input.toStringAsFixed(2));
+  } else {
+    return input.toStringAsFixed(6 - input.round().toString().length);
+  }
+}
+
+normalizeNumNoCommas(num input) {
+  if (input == null) {
+    input = 0;
+  }
+  if (input >= 1000) {
+    return input.toStringAsFixed(2);
+  } else {
+    return input.toStringAsFixed(6 - input.round().toString().length);
+  }
+}
+
+class TraceApp extends StatefulWidget {
+  TraceApp(this.themeMode, this.darkOLED);
+
+  final themeMode;
+  final darkOLED;
+
+  @override
+  TraceAppState createState() => TraceAppState();
+}
+
+class TraceAppState extends State<TraceApp> {
+  bool darkEnabled;
+  int themeMode;
+  bool darkOLED;
+
+  void savePreferences() async {
+    SharedPreferences prefs = await SharedPreferences.getInstance();
+    prefs.setInt("themeMode", themeMode);
+    prefs.setBool("shortenOn", shortenOn);
+    prefs.setBool("darkOLED", darkOLED);
+  }
+
+  toggleTheme() {
+    print('themeMode=='+ themeMode.toString());
+    switch (themeMode) {
+      case themeAuto:
+        themeMode = themeDark;
+        break;
+      case themeDark:
+        themeMode = themeLight;
+        break;
+      case themeLight:
+        themeMode = themeAuto;
+        break;
+    }
+    handleUpdate();
+    savePreferences();
+  }
+
+  setDarkEnabled() {
+    switch (themeMode) {
+      case themeAuto:
+        int nowHour = DateTime.now().hour;
+        if (nowHour > 6 && nowHour < 20) {
+          darkEnabled = false;
+        } else {
+          darkEnabled = true;
+        }
+        break;
+      case themeDark:
+        darkEnabled = true;
+        break;
+      case themeLight:
+        darkEnabled = false;
+        break;
+    }
+    setNavBarColor();
+  }
+
+  handleUpdate() {
+    setState(() {
+      setDarkEnabled();
+    });
+  }
+
+  switchOLED({state}) {
+    setState(() {
+      darkOLED = state ?? !darkOLED;
+    });
+    setNavBarColor();
+    savePreferences();
+  }
+
+  setNavBarColor() async {
+    if (darkEnabled) {
+      SystemChrome.setSystemUIOverlayStyle(SystemUiOverlayStyle.light
+          .copyWith(systemNavigationBarIconBrightness: Brightness.light, systemNavigationBarColor: darkOLED ? darkThemeOLED.primaryColor : darkTheme.primaryColor));
+    } else {
+      SystemChrome.setSystemUIOverlayStyle(
+          SystemUiOverlayStyle.dark.copyWith(systemNavigationBarIconBrightness: Brightness.dark, systemNavigationBarColor: lightTheme.primaryColor));
+    }
+  }
+
+  final ThemeData lightTheme = ThemeData(
+    primarySwatch: Colors.purple,
+    brightness: Brightness.light,
+    accentColor: Colors.purpleAccent[100],
+    primaryColor: Colors.white,
+    primaryColorLight: Colors.purple[700],
+    textSelectionTheme: TextSelectionThemeData(selectionHandleColor: Colors.purple[700]),
+    dividerColor: Colors.grey[200],
+    bottomAppBarColor: Colors.grey[200],
+    buttonColor: Colors.purple[700],
+    iconTheme: IconThemeData(color: Colors.white),
+    primaryIconTheme: IconThemeData(color: Colors.black),
+    accentIconTheme: IconThemeData(color: Colors.purple[700]),
+    disabledColor: Colors.grey[500],
+  );
+
+  final ThemeData darkTheme = ThemeData(
+    primarySwatch: Colors.purple,
+    brightness: Brightness.dark,
+    accentColor: Colors.deepPurpleAccent[100],
+    primaryColor: Color.fromRGBO(50, 50, 57, 1.0),
+    primaryColorLight: Colors.deepPurpleAccent[100],
+    textSelectionTheme: TextSelectionThemeData(selectionHandleColor: Colors.deepPurpleAccent[100]),
+    buttonColor: Colors.deepPurpleAccent[100],
+    iconTheme: IconThemeData(color: Colors.white),
+    accentIconTheme: IconThemeData(color: Colors.deepPurpleAccent[100]),
+    cardColor: Color.fromRGBO(55, 55, 55, 1.0),
+    dividerColor: Color.fromRGBO(60, 60, 60, 1.0),
+    bottomAppBarColor: Colors.black26,
+  );
+
+  final ThemeData darkThemeOLED = ThemeData(
+    brightness: Brightness.dark,
+    accentColor: Colors.deepPurpleAccent[100],
+    primaryColor: Color.fromRGBO(5, 5, 5, 1.0),
+    backgroundColor: Colors.black,
+    canvasColor: Colors.black,
+    primaryColorLight: Colors.deepPurple[300],
+    buttonColor: Colors.deepPurpleAccent[100],
+    accentIconTheme: IconThemeData(color: Colors.deepPurple[300]),
+    cardColor: Color.fromRGBO(16, 16, 16, 1.0),
+    dividerColor: Color.fromRGBO(20, 20, 20, 1.0),
+    bottomAppBarColor: Color.fromRGBO(19, 19, 19, 1.0),
+    dialogBackgroundColor: Colors.black,
+    textSelectionTheme: TextSelectionThemeData(selectionHandleColor: Colors.deepPurpleAccent[100]),
+    iconTheme: IconThemeData(color: Colors.white),
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    themeMode = widget.themeMode ?? "Automatic";
+    darkOLED = widget.darkOLED ?? false;
+    setDarkEnabled();
+  }
+
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-        debugShowCheckedModeBanner: false,
-        theme: ThemeData(
-            brightness: Brightness.light,
-            platform: TargetPlatform.iOS,
-            scaffoldBackgroundColor: Colors.white,
-            // primaryColor: Colors.white,
-            appBarTheme: AppBarTheme(
-              color: MyColors.redMedium,
-              iconTheme: new IconThemeData(color: Colors.white),
-            ),
-            // primaryTextTheme: TextTheme(title: TextStyle(color: Colors.white)),
-            iconTheme: IconThemeData(color: Colors.white, size: 28),
-            // backgroundColor: Colors.white,
-            fontFamily: Config.defaultFont),
-        home: Home(),
-        onGenerateRoute: RouteGenerator.authorizedRoute,
-        onUnknownRoute: (RouteSettings rs) => new MaterialPageRoute(
-            fullscreenDialog: false, builder: (context) => new NotFoundPage()));
+    isIOS = Theme.of(context).platform == TargetPlatform.iOS;
+    if (isIOS) {
+      upArrow = "↑";
+      downArrow = "↓";
+    }
+
+    return GetMaterialApp(
+        color: darkEnabled
+            ? darkOLED
+            ? darkThemeOLED.primaryColor
+            : darkTheme.primaryColor
+            : lightTheme.primaryColor,
+        title: Text('trace'.tr).data,
+        home: Tabs(
+          savePreferences: savePreferences,
+          toggleTheme: toggleTheme,
+          handleUpdate: handleUpdate,
+          darkEnabled: darkEnabled,
+          themeMode: themeMode,
+          switchOLED: switchOLED,
+          darkOLED: darkOLED,
+        ),
+        theme: darkEnabled
+            ? darkOLED
+            ? darkThemeOLED
+            : darkTheme
+            : lightTheme,
+        routes: <String, WidgetBuilder>{
+          "/settings": (BuildContext context) => SettingsPage(
+            savePreferences: savePreferences,
+            toggleTheme: toggleTheme,
+            darkEnabled: darkEnabled,
+            themeMode: themeMode,
+            switchOLED: switchOLED,
+            darkOLED: darkOLED,
+          ),
+        },
+        locale: LocalizationService.locale,
+        fallbackLocale: LocalizationService.fallbackLocale,
+        translations: LocalizationService());
   }
 }
